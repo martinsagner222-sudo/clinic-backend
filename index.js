@@ -1,18 +1,26 @@
 import express from "express";
 import dotenv from "dotenv";
 import fetch from "node-fetch";
+import { createClient } from "@supabase/supabase-js";
 
 import { buscarMemoria, salvarMemoria } from "./brain/memoriaAtendimento.js";
 import { decidirProximoPasso } from "./brain/decisorIA.js";
-
-import { createClient } from "@supabase/supabase-js";
 
 dotenv.config();
 
 const app = express();
 app.use(express.json());
 
-const PORT = 3000;
+const PORT = process.env.PORT || 3000;
+
+if (!process.env.SUPABASE_URL)
+  throw new Error("SUPABASE_URL não definida");
+
+if (!process.env.SUPABASE_SERVICE_ROLE_KEY)
+  throw new Error("SUPABASE_SERVICE_ROLE_KEY não definida");
+
+if (!process.env.EVOLUTION_URL)
+  throw new Error("EVOLUTION_URL não definida");
 
 const supabase = createClient(
   process.env.SUPABASE_URL,
@@ -21,77 +29,45 @@ const supabase = createClient(
 
 /*
 ========================================
-CRIAR EMPRESA
-========================================
-*/
-app.post("/empresa/criar", async (req, res) => {
-  try {
-    const { nome, evolution_instance, evolution_api_key } = req.body;
-
-    if (!nome || !evolution_instance || !evolution_api_key) {
-      return res.status(400).json({ erro: "Dados incompletos" });
-    }
-
-    const { data: empresa, error: erroEmpresa } = await supabase
-      .from("empresas")
-      .insert([{ nome }])
-      .select()
-      .single();
-
-    if (erroEmpresa) {
-      return res.status(500).json({ erro: erroEmpresa.message });
-    }
-
-    const { error: erroConexao } = await supabase
-      .from("conexoes_whatsapp")
-      .insert([
-        {
-          empresa_id: empresa.id,
-          evolution_instance,
-          evolution_api_key,
-        },
-      ]);
-
-    if (erroConexao) {
-      return res.status(500).json({ erro: erroConexao.message });
-    }
-
-    res.json({
-      sucesso: true,
-      empresa_id: empresa.id,
-    });
-  } catch (err) {
-    res.status(500).json({ erro: "Erro interno" });
-  }
-});
-
-/*
-========================================
-WEBHOOK
+WEBHOOK EVOLUTION
 ========================================
 */
 app.post("/webhook", async (req, res) => {
   try {
     const body = req.body;
 
-    if (!body?.data) return res.status(200).send("IGNORADO");
+    if (!body?.data) {
+      return res.status(200).send("IGNORADO");
+    }
 
-    const instanceName = body?.instance;
+    const instanceName = body.instance;
 
-    const { data: conexao } = await supabase
+    if (!instanceName) {
+      return res.status(400).send("Instância não informada");
+    }
+
+    // 🔎 Buscar conexão pelo nome da instância
+    const { data: conexao, error } = await supabase
       .from("conexoes_whatsapp")
       .select("*")
       .eq("evolution_instance", instanceName)
       .maybeSingle();
 
-    if (!conexao) return res.status(400).send("Empresa não encontrada");
+    if (error) {
+      console.log("Erro ao buscar conexão:", error.message);
+      return res.status(500).send("Erro banco");
+    }
+
+    if (!conexao) {
+      return res.status(400).send("Empresa não encontrada");
+    }
 
     const empresaId = conexao.empresa_id;
 
     const telefone =
-      body?.data?.key?.remoteJid?.replace("@c.us", "") ||
-      body?.data?.key?.remoteJid?.replace("@lid", "") ||
-      null;
+      body?.data?.key?.remoteJid
+        ?.replace("@c.us", "")
+        ?.replace("@lid", "") || null;
 
     let mensagem = null;
 
@@ -101,10 +77,11 @@ app.post("/webhook", async (req, res) => {
       mensagem = body.data.message.extendedTextMessage.text;
     }
 
-    if (!telefone || !mensagem)
+    if (!telefone || !mensagem) {
       return res.status(200).send("IGNORADO");
+    }
 
-    // 🔥 SALVA ENTRADA
+    // 🔥 Salvar mensagem de entrada
     await supabase.from("mensagens").insert([
       {
         empresa_id: empresaId,
@@ -126,7 +103,7 @@ app.post("/webhook", async (req, res) => {
       contexto: decisaoIA.contexto,
     });
 
-    // 🔥 SALVA SAÍDA
+    // 🔥 Salvar resposta
     await supabase.from("mensagens").insert([
       {
         empresa_id: empresaId,
@@ -136,7 +113,7 @@ app.post("/webhook", async (req, res) => {
       },
     ]);
 
-    const url = `${process.env.EVOLUTION_URL}/message/sendText/${instanceName}`;
+    const url = `https://${process.env.EVOLUTION_URL}/message/sendText/${instanceName}`;
 
     await fetch(url, {
       method: "POST",
@@ -152,11 +129,15 @@ app.post("/webhook", async (req, res) => {
 
     res.status(200).send("OK");
   } catch (err) {
-    console.log(err);
+    console.log("Erro geral:", err.message);
     res.status(500).send("ERRO");
   }
 });
 
+app.get("/", (req, res) => {
+  res.send("Brain multiempresa online");
+});
+
 app.listen(PORT, () => {
-  console.log("Brain multiempresa online");
+  console.log(`Servidor rodando na porta ${PORT}`);
 });
